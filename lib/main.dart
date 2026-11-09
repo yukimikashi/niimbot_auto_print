@@ -3,8 +3,8 @@ import 'dart:io';
 
 import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
-import 'package:niimbot_print/model/blue_device_info_model.dart';
-import 'package:niimbot_print/niimbot_print.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart' show BluetoothDevice;
+import 'package:niim_blue_flutter/niim_blue_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 void main() {
@@ -33,19 +33,23 @@ class PrintHomePage extends StatefulWidget {
 }
 
 class _PrintHomePageState extends State<PrintHomePage> {
+  // B1のMACアドレス。スキャンで見つからない場合はこれで直接接続する。
+  static const String _b1Mac = '03:31:08:B6:88:2E';
+
+  // 50x30mm @203dpi
+  static const int _labelWidthPx = 400;
+  static const int _labelHeightPx = 240;
+
   final AppLinks _appLinks = AppLinks();
-  final NiimbotPrint _printer = NiimbotPrint();
 
   StreamSubscription<Uri>? _linkSubscription;
   bool _busy = false;
-  String _status = '待機中。Termuxから印刷リクエストを受け付けます。';
+  final List<String> _lines = ['待機中。Termuxから印刷リクエストを受け付けます。'];
   String _lastPath = '';
 
   @override
   void initState() {
     super.initState();
-    // app_links は cold start の初回リンクも stream に流すため、
-    // getInitialLink() と二重に処理しない。
     _linkSubscription = _appLinks.uriLinkStream.listen(
       _handleIncomingUri,
       onError: (Object error) => _setStatus('リンク受信エラー: $error'),
@@ -58,9 +62,13 @@ class _PrintHomePageState extends State<PrintHomePage> {
     super.dispose();
   }
 
+  // 経過を上書きせず積み上げて表示する(エラー時も検出台数などが残る)。
   void _setStatus(String value) {
     if (!mounted) return;
-    setState(() => _status = value);
+    setState(() {
+      _lines.add(value);
+      if (_lines.length > 30) _lines.removeAt(0);
+    });
   }
 
   Future<void> _handleIncomingUri(Uri uri) async {
@@ -74,15 +82,11 @@ class _PrintHomePageState extends State<PrintHomePage> {
   }
 
   Future<bool> _requestImagePermission() async {
-    // Android 13/14 の共有ストレージ上の画像を読む権限。
     final status = await Permission.photos.request();
     if (status.isGranted || status.isLimited) return true;
     _setStatus('画像の読み取り権限がありません。アプリ設定で写真と動画へのアクセスを許可してください。');
     return false;
   }
-
-  // B1のMACアドレス。スキャンで見つからない場合はこれで直接接続する。
-  static const String _b1Mac = '03:31:08:B6:88:2E';
 
   Future<bool> _requestBluetoothPermission() async {
     final results = await [
@@ -105,117 +109,93 @@ class _PrintHomePageState extends State<PrintHomePage> {
     }
     _busy = true;
     _lastPath = path;
+    NiimbotBluetoothClient? client;
     try {
       _setStatus('画像を確認中: $path');
 
       if (!await _requestImagePermission()) return;
+      if (!await _requestBluetoothPermission()) return;
 
       final imageFile = File(path);
       if (!await imageFile.exists()) {
         throw Exception('画像ファイルが見つかりません: $path');
       }
-      final length = await imageFile.length();
-      if (length == 0) throw Exception('画像ファイルが空です。');
+      final bytes = await imageFile.readAsBytes();
+      if (bytes.isEmpty) throw Exception('画像ファイルが空です。');
 
-      if (!await _requestBluetoothPermission()) return;
-
-      _setStatus('NIIMBOT B1を検索中...');
-
-      List<BlueDeviceInfoModel> devices = [];
+      // --- BLEで検索 ---
+      _setStatus('NIIMBOT B1をBLEで検索中...');
+      List<BluetoothDevice> devices = [];
       try {
-        devices = await _printer.onStartScan(
-          scanDuration: const Duration(seconds: 15),
-          onError: (message) {
-            _setStatus('Bluetooth検索エラー: $message');
-          },
+        devices = await NiimbotBluetoothClient.listDevices(
+          timeout: const Duration(seconds: 8),
         );
       } catch (e) {
-        _setStatus('検索で例外: $e\nMACアドレスで直接接続を試します。');
+        _setStatus('検索で例外: $e');
+      }
+      _setStatus('NIIMBOT機器を${devices.length}台検出'
+          '${devices.isEmpty ? '' : '\n${devices.map((d) => '${d.platformName} ${d.remoteId.str}').join('\n')}'}');
+
+      // MAC一致を優先 → 無ければ先頭 → 無ければMAC直指定
+      final BluetoothDevice device = devices.firstWhere(
+        (d) => d.remoteId.str.toUpperCase() == _b1Mac,
+        orElse: () =>
+            devices.isNotEmpty ? devices.first : BluetoothDevice.fromId(_b1Mac),
+      );
+
+      // --- 接続 ---
+      _setStatus('B1に接続中: ${device.remoteId.str}');
+      client = NiimbotBluetoothClient();
+      client.setDevice(device);
+      await client.connect().timeout(
+            const Duration(seconds: 25),
+            onTimeout: () => throw TimeoutException('B1接続がタイムアウトしました。'),
+          );
+      _setStatus('B1接続成功');
+
+      client.stopHeartbeat();
+      client.setPacketInterval(0);
+
+      // --- 印刷 ---
+      _setStatus('50×30mmラベルに印刷中...');
+      final task = client.createPrintTask(
+        options: const PrintOptions(
+          totalPages: 1,
+          density: 3,
+          labelType: LabelType.withGaps,
+          statusPollIntervalMs: 100,
+          statusTimeoutMs: 8000,
+        ),
+      );
+      if (task == null) {
+        throw Exception('プリンタの機種を判別できませんでした。');
       }
 
-      // MACが一致する機器を優先。見つからなければMAC直指定で接続を試す。
-      BlueDeviceInfoModel target = devices.firstWhere(
-        (d) => (d.deviceHardwareAddress ?? '').toUpperCase() == _b1Mac,
-        orElse: () => BlueDeviceInfoModel(
-          deviceName: 'B1',
-          deviceHardwareAddress: _b1Mac,
-        ),
-      );
-      _setStatus('検出 ${devices.length}台。接続先: '
-          '${target.deviceName} ${target.deviceHardwareAddress}');
-
-      _setStatus('B1に接続中...');
-      final connectCompleter = Completer<bool>();
-      await _printer.onStartConnect(
-        model: target,
-        onResult: (isSuccess, message) {
-          if (!connectCompleter.isCompleted) {
-            if (isSuccess) {
-              _setStatus('B1接続成功: $message');
-              connectCompleter.complete(true);
-            } else {
-              connectCompleter.completeError(Exception('B1接続失敗: $message'));
-            }
-          }
-        },
-      );
-      final connected = await connectCompleter.future.timeout(
-        const Duration(seconds: 25),
-        onTimeout: () => throw TimeoutException('B1接続がタイムアウトしました。'),
-      );
-      if (!connected) throw Exception('B1に接続できませんでした。');
-
-      _setStatus('50×30mmラベルに印刷中...');
-      // B1の印字ヘッドは384dot幅。50mm媒体の左右に約1mmずつ余白を取り、
-      // 48×28.8mmの枠に画像を収める。元画像は縦横比を保って作成すること。
-      final imageElement = await NiimbotImageElement.fromFile(
-        path: path,
-        frame: const NiimbotRect(
-          x: 1,
-          y: 0.6,
-          width: 48,
-          height: 28.8,
+      // 元画像は 5:3(例: 400x240)で作成すること。
+      final page = PrintPage(_labelWidthPx, _labelHeightPx);
+      page.addImageFromBuffer(
+        ImageFromBufferOptions(
+          x: 0,
+          y: 0,
+          width: _labelWidthPx,
+          height: _labelHeightPx,
+          buffer: bytes,
+          threshold: 128,
         ),
       );
 
-      final printCompleter = Completer<void>();
-      await _printer.onStartPrint(
-        layout: const NiimbotLabelLayout(
-          size: NiimbotLabelSize.mm50x30,
-          orientation: NiimbotLabelOrientation.landscape,
-          padding: 1,
-        ),
-        elements: [imageElement],
-        onError: (error) {
-          if (!printCompleter.isCompleted) {
-            printCompleter.completeError(
-              Exception('印刷データエラー ${error.code}: ${error.message}'),
-            );
-          }
-        },
-        onResult: (isSuccess, message) {
-          if (!printCompleter.isCompleted) {
-            if (isSuccess) {
-              printCompleter.complete();
-            } else {
-              printCompleter.completeError(Exception('印刷失敗: $message'));
-            }
-          }
-        },
-      );
-
-      await printCompleter.future.timeout(
-        const Duration(minutes: 2),
-        onTimeout: () => throw TimeoutException('印刷完了の応答がありません。'),
-      );
+      await task.printInit();
+      await task.printPage(page.toEncodedImage(), 1);
+      await task.waitForFinished();
+      await client.abstraction.printEnd();
       _setStatus('印刷完了: $path');
     } catch (error) {
       _setStatus('印刷エラー: $error');
     } finally {
       try {
-        await _printer.onDisconnect();
+        await client?.disconnect();
       } catch (_) {
-        // 印刷失敗時の切断エラーは元のエラー表示を上書きしない。
+        // 切断エラーは元のエラー表示を上書きしない。
       }
       _busy = false;
     }
@@ -243,10 +223,15 @@ class _PrintHomePageState extends State<PrintHomePage> {
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 20),
-            SelectableText(_status),
+            Expanded(
+              child: SingleChildScrollView(
+                reverse: true,
+                child: SelectableText(_lines.join('\n')),
+              ),
+            ),
             const SizedBox(height: 12),
             if (_lastPath.isNotEmpty) SelectableText('直近の画像: $_lastPath'),
-            const Spacer(),
+            const SizedBox(height: 12),
             OutlinedButton.icon(
               onPressed: _busy ? null : _testPrint,
               icon: const Icon(Icons.science),
