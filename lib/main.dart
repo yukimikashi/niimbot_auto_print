@@ -100,11 +100,27 @@ class _PrintHomePageState extends State<PrintHomePage> {
       if (length == 0) throw Exception('画像ファイルが空です。');
 
       _setStatus('NIIMBOT B1を検索中...');
+
       final devices = await _printer.onStartScan(
-        scanDuration: const Duration(seconds: 7),
-        whiteListDevices: const [NiimbotModelEnum.b1],
-        onError: (message) => _setStatus('Bluetooth検索エラー: $message'),
+        // 検索時間を15秒に延長
+        scanDuration: const Duration(seconds: 15),
+
+        // whiteListDevicesを指定しない
+        // 周囲のBluetooth機器を広く検索する
+
+        onError: (message) {
+          _setStatus('Bluetooth検索エラー: $message');
+        },
       );
+
+// 検出した機器をすべてログに表示
+      if (devices.isEmpty) {
+        throw Exception('Bluetooth機器が1台も検出されませんでした。'
+            '権限・Bluetooth設定を確認してください。');
+      }
+
+      _setStatus('Bluetooth機器を${devices.length}台検出しました。\n'
+          '${devices.map((d) => d.toString()).join('\n')}');
 
       if (devices.isEmpty) {
         throw Exception('B1が見つかりません。電源・Bluetooth・プリンターとの距離を確認してください。');
@@ -211,8 +227,7 @@ class _PrintHomePageState extends State<PrintHomePage> {
             const SizedBox(height: 20),
             SelectableText(_status),
             const SizedBox(height: 12),
-            if (_lastPath.isNotEmpty)
-              SelectableText('直近の画像: $_lastPath'),
+            if (_lastPath.isNotEmpty) SelectableText('直近の画像: $_lastPath'),
             const Spacer(),
             OutlinedButton.icon(
               onPressed: _busy ? null : _testPrint,
