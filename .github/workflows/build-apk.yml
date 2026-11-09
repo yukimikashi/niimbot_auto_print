@@ -1,0 +1,42 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.44.0"
+          channel: stable
+          cache: true
+
+      - name: Generate Android platform files
+        shell: bash
+        run: |
+          mkdir -p /tmp/niimbot-src
+          cp pubspec.yaml /tmp/niimbot-src/
+          cp lib/main.dart /tmp/niimbot-src/main.dart
+          cp android/app/src/main/AndroidManifest.xml /tmp/niimbot-src/AndroidManifest.xml
+          flutter create --platforms=android --org jp.example --project-name niimbot_auto_print .
+          cp /tmp/niimbot-src/pubspec.yaml pubspec.yaml
+          cp /tmp/niimbot-src/main.dart lib/main.dart
+          cp /tmp/niimbot-src/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+
+      - name: Resolve packages
+        run: flutter pub get
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: niimbot-auto-print-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
