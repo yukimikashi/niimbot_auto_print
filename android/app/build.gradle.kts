@@ -47,3 +47,9 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+configurations {
+    all {
+        exclude(group = "com.google.common.util.concurrent", module = "listenablefuture")
+    }
+}
