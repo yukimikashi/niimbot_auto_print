@@ -48,8 +48,8 @@ flutter {
     source = "../.."
 }
 
-configurations {
-    all {
-        exclude(group = "com.google.common.util.concurrent", module = "listenablefuture")
+configurations.all {
+    resolutionStrategy {
+        force("com.google.guava:guava:31.1-android")
     }
 }
