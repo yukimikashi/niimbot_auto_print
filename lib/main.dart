@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
+import 'package:niimbot_print/model/blue_device_info_model.dart';
 import 'package:niimbot_print/niimbot_print.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -80,6 +81,23 @@ class _PrintHomePageState extends State<PrintHomePage> {
     return false;
   }
 
+  // B1のMACアドレス。スキャンで見つからない場合はこれで直接接続する。
+  static const String _b1Mac = '03:31:08:B6:88:2E';
+
+  Future<bool> _requestBluetoothPermission() async {
+    final results = await [
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+      Permission.locationWhenInUse,
+    ].request();
+    final scan = results[Permission.bluetoothScan]?.isGranted ?? false;
+    final connect = results[Permission.bluetoothConnect]?.isGranted ?? false;
+    if (scan && connect) return true;
+    _setStatus('Bluetooth権限(付近のデバイス)がありません。'
+        'アプリ設定 > 権限 > 付近のデバイス を許可してください。');
+    return false;
+  }
+
   Future<void> _printFile(String path) async {
     if (_busy) {
       _setStatus('別の印刷処理が実行中です。少し待ってから再送してください。');
@@ -99,37 +117,37 @@ class _PrintHomePageState extends State<PrintHomePage> {
       final length = await imageFile.length();
       if (length == 0) throw Exception('画像ファイルが空です。');
 
+      if (!await _requestBluetoothPermission()) return;
+
       _setStatus('NIIMBOT B1を検索中...');
 
-      final devices = await _printer.onStartScan(
-        // 検索時間を15秒に延長
-        scanDuration: const Duration(seconds: 15),
+      List<BlueDeviceInfoModel> devices = [];
+      try {
+        devices = await _printer.onStartScan(
+          scanDuration: const Duration(seconds: 15),
+          onError: (message) {
+            _setStatus('Bluetooth検索エラー: $message');
+          },
+        );
+      } catch (e) {
+        _setStatus('検索で例外: $e\nMACアドレスで直接接続を試します。');
+      }
 
-        // whiteListDevicesを指定しない
-        // 周囲のBluetooth機器を広く検索する
-
-        onError: (message) {
-          _setStatus('Bluetooth検索エラー: $message');
-        },
+      // MACが一致する機器を優先。見つからなければMAC直指定で接続を試す。
+      BlueDeviceInfoModel target = devices.firstWhere(
+        (d) => (d.deviceHardwareAddress ?? '').toUpperCase() == _b1Mac,
+        orElse: () => BlueDeviceInfoModel(
+          deviceName: 'B1',
+          deviceHardwareAddress: _b1Mac,
+        ),
       );
-
-// 検出した機器をすべてログに表示
-      if (devices.isEmpty) {
-        throw Exception('Bluetooth機器が1台も検出されませんでした。'
-            '権限・Bluetooth設定を確認してください。');
-      }
-
-      _setStatus('Bluetooth機器を${devices.length}台検出しました。\n'
-          '${devices.map((d) => d.toString()).join('\n')}');
-
-      if (devices.isEmpty) {
-        throw Exception('B1が見つかりません。電源・Bluetooth・プリンターとの距離を確認してください。');
-      }
+      _setStatus('検出 ${devices.length}台。接続先: '
+          '${target.deviceName} ${target.deviceHardwareAddress}');
 
       _setStatus('B1に接続中...');
       final connectCompleter = Completer<bool>();
       await _printer.onStartConnect(
-        model: devices.first,
+        model: target,
         onResult: (isSuccess, message) {
           if (!connectCompleter.isCompleted) {
             if (isSuccess) {
