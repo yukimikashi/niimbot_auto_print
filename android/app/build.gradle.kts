@@ -6,8 +6,9 @@ plugins {
 
 android {
     namespace = "com.example.niimbot_auto_print"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
+
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
