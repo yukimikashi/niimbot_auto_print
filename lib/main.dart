@@ -159,7 +159,7 @@ class _PrintHomePageState extends State<PrintHomePage> {
       // --- 印刷 ---
       _setStatus('50×30mmラベルに印刷中...');
       final task = client.createPrintTask(
-        options: const PrintOptions(
+        PrintOptions(
           totalPages: 1,
           density: 3,
           labelType: LabelType.withGaps,
