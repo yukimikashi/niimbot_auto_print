@@ -243,7 +243,8 @@ class _PrintHomePageState extends State<PrintHomePage> {
       return;
     }
     try {
-      await const MethodChannel('niimbot/background_control').invokeMethod('start');
+      await const MethodChannel('niimbot/background_control')
+          .invokeMethod('start');
       _setStatus('バックグラウンド印刷サービスを開始しました。常駐通知が表示されます。');
     } catch (error) {
       _setStatus('バックグラウンドサービス開始エラー: $error');
@@ -252,7 +253,8 @@ class _PrintHomePageState extends State<PrintHomePage> {
 
   Future<void> _stopBackgroundPrint() async {
     try {
-      await const MethodChannel('niimbot/background_control').invokeMethod('stop');
+      await const MethodChannel('niimbot/background_control')
+          .invokeMethod('stop');
       _setStatus('バックグラウンド印刷サービスを停止しました。');
     } catch (error) {
       _setStatus('サービス停止エラー: $error');
@@ -315,7 +317,6 @@ class _PrintHomePageState extends State<PrintHomePage> {
   }
 }
 
-
 // Separate Flutter engine entry point used by the Android foreground service.
 // Permissions are requested in the visible app before the service is started.
 @pragma('vm:entry-point')
@@ -326,6 +327,7 @@ Future<void> backgroundMain() async {
   const labelWidthPx = 400;
   const labelHeightPx = 240;
   bool busy = false;
+  String scanInfo = '';
 
   Future<void> status(String message) async {
     try {
@@ -342,6 +344,7 @@ Future<void> backgroundMain() async {
     busy = true;
     NiimbotBluetoothClient? client;
     try {
+      scanInfo = '';
       await status('画像を読み込み中');
       final imageFile = File(path);
       if (!await imageFile.exists()) {
@@ -351,7 +354,8 @@ Future<void> backgroundMain() async {
       if (bytes.isEmpty) throw Exception('画像ファイルが空です。');
       final decoded = img.decodeImage(bytes);
       if (decoded == null) throw Exception('画像をデコードできませんでした。');
-      final flat = img.Image(width: decoded.width, height: decoded.height, numChannels: 3);
+      final flat = img.Image(
+          width: decoded.width, height: decoded.height, numChannels: 3);
       img.fill(flat, color: img.ColorRgb8(255, 255, 255));
       img.compositeImage(flat, decoded);
       final resized = img.copyResize(
@@ -363,23 +367,48 @@ Future<void> backgroundMain() async {
       final printBytes = Uint8List.fromList(img.encodePng(resized));
 
       await status('NIIMBOT B1を検索中');
-      final devices = await NiimbotBluetoothClient.listDevices(
-        timeout: const Duration(seconds: 8),
-      );
+      List<BluetoothDevice> devices = [];
+      try {
+        devices = await NiimbotBluetoothClient.listDevices(
+          timeout: const Duration(seconds: 8),
+        );
+      } catch (e) {
+        scanInfo = '検索例外';
+      }
+      if (scanInfo.isEmpty) {
+        scanInfo = devices.isEmpty ? '検索0台→MAC直指定' : '検索${devices.length}台';
+      }
       final BluetoothDevice device = devices.firstWhere(
         (d) => d.remoteId.str.toUpperCase() == b1Mac,
-        orElse: () => devices.isNotEmpty
-            ? devices.first
-            : BluetoothDevice.fromId(b1Mac),
+        orElse: () =>
+            devices.isNotEmpty ? devices.first : BluetoothDevice.fromId(b1Mac),
       );
 
-      await status('B1に接続中');
-      client = NiimbotBluetoothClient();
-      client.setDevice(device);
-      await client.connect().timeout(
-        const Duration(seconds: 25),
-        onTimeout: () => throw TimeoutException('B1接続がタイムアウトしました。'),
-      );
+      // 接続は最大3回まで再試行する(BLEは初回接続に失敗しやすい)。
+      Object? lastError;
+      for (var attempt = 1; attempt <= 3; attempt++) {
+        await status('B1に接続中($attempt/3) $scanInfo');
+        final c = NiimbotBluetoothClient();
+        c.setDevice(device);
+        try {
+          await c.connect().timeout(
+                const Duration(seconds: 25),
+                onTimeout: () => throw TimeoutException('B1接続がタイムアウトしました。'),
+              );
+          client = c;
+          lastError = null;
+          break;
+        } catch (e) {
+          lastError = e;
+          try {
+            await c.disconnect();
+          } catch (_) {}
+          await Future<void>.delayed(const Duration(seconds: 2));
+        }
+      }
+      if (client == null) {
+        throw Exception('接続失敗(3回): $lastError');
+      }
       client.stopHeartbeat();
       client.setPacketInterval(0);
 
@@ -415,11 +444,11 @@ Future<void> backgroundMain() async {
         'message': '印刷完了：${DateTime.now().toLocal()}',
       });
     } catch (error) {
-      await status('印刷エラー: $error');
+      await status('印刷エラー[$scanInfo]: $error');
       try {
         await channel.invokeMethod('printResult', {
           'success': false,
-          'message': '印刷エラー: $error',
+          'message': '印刷エラー[$scanInfo]: $error',
         });
       } catch (_) {}
     } finally {
