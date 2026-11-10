@@ -37,7 +37,8 @@ class PrintHomePage extends StatefulWidget {
 
 class _PrintHomePageState extends State<PrintHomePage> {
   // B1のMACアドレス。スキャンで見つからない場合はこれで直接接続する。
-  static const String _b1Mac = '03:31:08:B6:88:2E';
+  // BLEで見えるアドレス(本体シールのMACとは並びが違う)。
+  static const String _b1Mac = '31:08:03:B6:88:2E';
 
   // 50x30mm @203dpi
   static const int _labelWidthPx = 400;
@@ -323,6 +324,8 @@ class _PrintHomePageState extends State<PrintHomePage> {
 Future<void> backgroundMain() async {
   WidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('niimbot/background_print');
+  // 本体シールのMAC(03:31:08:B6:88:2E)ではなく、BLEで見えるアドレス。
+  const b1BleAddress = '31:08:03:B6:88:2E';
   const labelWidthPx = 400;
   const labelHeightPx = 240;
   bool busy = false;
@@ -379,14 +382,16 @@ Future<void> backgroundMain() async {
           lastError = e;
         }
 
+        // 検索で見つからない場合(他アプリが前面のときなど)は、
+        // 検索なしで BLEアドレス を指定して直接接続する。
+        final BluetoothDevice device;
         if (devices.isEmpty) {
-          scanInfo = '検索0台($attempt/$maxAttempts)';
-          lastError = Exception('B1が見つかりません');
-          await Future<void>.delayed(const Duration(seconds: 2));
-          continue;
+          device = BluetoothDevice.fromId(b1BleAddress);
+          scanInfo = '検索0台→直接接続($attempt/$maxAttempts)';
+        } else {
+          device = devices.first;
+          scanInfo = '検索${devices.length}台($attempt/$maxAttempts)';
         }
-        final BluetoothDevice device = devices.first;
-        scanInfo = '検索${devices.length}台($attempt/$maxAttempts)';
 
         await status('B1に接続中($attempt/$maxAttempts) $scanInfo');
         final c = NiimbotBluetoothClient();
