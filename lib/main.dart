@@ -323,7 +323,6 @@ class _PrintHomePageState extends State<PrintHomePage> {
 Future<void> backgroundMain() async {
   WidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('niimbot/background_print');
-  const b1Mac = '03:31:08:B6:88:2E';
   const labelWidthPx = 400;
   const labelHeightPx = 240;
   bool busy = false;
@@ -366,28 +365,30 @@ Future<void> backgroundMain() async {
       );
       final printBytes = Uint8List.fromList(img.encodePng(resized));
 
-      await status('NIIMBOT B1を検索中');
-      List<BluetoothDevice> devices = [];
-      try {
-        devices = await NiimbotBluetoothClient.listDevices(
-          timeout: const Duration(seconds: 8),
-        );
-      } catch (e) {
-        scanInfo = '検索例外';
-      }
-      if (scanInfo.isEmpty) {
-        scanInfo = devices.isEmpty ? '検索0台→MAC直指定' : '検索${devices.length}台';
-      }
-      final BluetoothDevice device = devices.firstWhere(
-        (d) => d.remoteId.str.toUpperCase() == b1Mac,
-        orElse: () =>
-            devices.isNotEmpty ? devices.first : BluetoothDevice.fromId(b1Mac),
-      );
-
-      // 接続は最大3回まで再試行する(BLEは初回接続に失敗しやすい)。
+      // 「検索 → 接続」を最大 maxAttempts 回まで繰り返す(BLEは初回に失敗しやすい)。
+      const maxAttempts = 5;
       Object? lastError;
-      for (var attempt = 1; attempt <= 3; attempt++) {
-        await status('B1に接続中($attempt/3) $scanInfo');
+      for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+        await status('B1を検索中($attempt/$maxAttempts)');
+        List<BluetoothDevice> devices = [];
+        try {
+          devices = await NiimbotBluetoothClient.listDevices(
+            timeout: const Duration(seconds: 6),
+          );
+        } catch (e) {
+          lastError = e;
+        }
+
+        if (devices.isEmpty) {
+          scanInfo = '検索0台($attempt/$maxAttempts)';
+          lastError = Exception('B1が見つかりません');
+          await Future<void>.delayed(const Duration(seconds: 2));
+          continue;
+        }
+        final BluetoothDevice device = devices.first;
+        scanInfo = '検索${devices.length}台($attempt/$maxAttempts)';
+
+        await status('B1に接続中($attempt/$maxAttempts) $scanInfo');
         final c = NiimbotBluetoothClient();
         c.setDevice(device);
         try {
@@ -407,7 +408,7 @@ Future<void> backgroundMain() async {
         }
       }
       if (client == null) {
-        throw Exception('接続失敗(3回): $lastError');
+        throw Exception('接続失敗($maxAttempts回): $lastError');
       }
       client.stopHeartbeat();
       client.setPacketInterval(0);
