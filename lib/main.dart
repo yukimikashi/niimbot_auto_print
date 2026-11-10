@@ -352,21 +352,27 @@ Future<void> backgroundMain() async {
       if (!await imageFile.exists()) {
         throw Exception('画像ファイルが見つかりません: $path');
       }
-      final bytes = await imageFile.readAsBytes();
-      if (bytes.isEmpty) throw Exception('画像ファイルが空です。');
-      final decoded = img.decodeImage(bytes);
-      if (decoded == null) throw Exception('画像をデコードできませんでした。');
-      final flat = img.Image(
-          width: decoded.width, height: decoded.height, numChannels: 3);
-      img.fill(flat, color: img.ColorRgb8(255, 255, 255));
-      img.compositeImage(flat, decoded);
-      final resized = img.copyResize(
-        flat,
-        width: labelWidthPx,
-        height: labelHeightPx,
-        interpolation: img.Interpolation.nearest,
-      );
-      final printBytes = Uint8List.fromList(img.encodePng(resized));
+      final sw = Stopwatch()..start();
+
+      // 画像の変換は、プリンタへの接続と並行して行う(接続待ちの間に済ませる)。
+      final prepFuture = () async {
+        final bytes = await imageFile.readAsBytes();
+        if (bytes.isEmpty) throw Exception('画像ファイルが空です。');
+        final decoded = img.decodeImage(bytes);
+        if (decoded == null) throw Exception('画像をデコードできませんでした。');
+        final flat = img.Image(
+            width: decoded.width, height: decoded.height, numChannels: 3);
+        img.fill(flat, color: img.ColorRgb8(255, 255, 255));
+        img.compositeImage(flat, decoded);
+        final resized = img.copyResize(
+          flat,
+          width: labelWidthPx,
+          height: labelHeightPx,
+          interpolation: img.Interpolation.nearest,
+        );
+        return Uint8List.fromList(img.encodePng(resized));
+      }();
+      prepFuture.ignore(); // 接続失敗で途中離脱しても未処理エラーにしない
 
       // 「検索 → 接続」を最大 maxAttempts 回まで繰り返す(BLEは初回に失敗しやすい)。
       const maxAttempts = 5;
@@ -421,14 +427,16 @@ Future<void> backgroundMain() async {
       }
       client.stopHeartbeat();
       client.setPacketInterval(0);
+      final printBytes = await prepFuture;
+      final tConnect = sw.elapsedMilliseconds;
 
-      await status('ラベルに印刷中');
+      status('ラベルに印刷中'); // 待たずに進める
       final task = client.createPrintTask(
         PrintOptions(
           totalPages: 1,
           density: 3,
           labelType: LabelType.withGaps,
-          statusPollIntervalMs: 100,
+          statusPollIntervalMs: 50,
           statusTimeoutMs: 8000,
         ),
       );
@@ -445,13 +453,20 @@ Future<void> backgroundMain() async {
         ),
       );
       await task.printInit();
+      final tInit = sw.elapsedMilliseconds;
       await task.printPage(page.toEncodedImage(), 1);
+      final tSend = sw.elapsedMilliseconds;
       await task.waitForFinished();
+      final tFinish = sw.elapsedMilliseconds;
       await client.abstraction.printEnd();
-      await status('印刷完了');
+      final tEnd = sw.elapsedMilliseconds;
+      final timing = '接続${tConnect}ms/準備${tInit - tConnect}ms/'
+          '転送${tSend - tInit}ms/完了待ち${tFinish - tSend}ms/'
+          '終了${tEnd - tFinish}ms/計${tEnd}ms';
+      await status('印刷完了 $timing');
       await channel.invokeMethod('printResult', {
         'success': true,
-        'message': '印刷完了：${DateTime.now().toLocal()}',
+        'message': '印刷完了 $timing',
       });
     } catch (error) {
       await status('印刷エラー[$scanInfo]: $error');
