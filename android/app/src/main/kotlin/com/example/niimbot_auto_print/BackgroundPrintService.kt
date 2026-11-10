@@ -17,6 +17,9 @@ class BackgroundPrintService : Service() {
     companion object {
         const val ACTION_PRINT = "com.example.niimbot_auto_print.PRINT"
         const val EXTRA_PATH = "path"
+        const val EXTRA_COPIES = "copies"
+        // 打ち間違い(例: 1000)でラベルを無駄にしないための上限。
+        const val MAX_COPIES = 20
         private const val CHANNEL_ID = "niimbot_background_print"
         private const val NOTIFICATION_ID = 4101
         private const val DART_CHANNEL = "niimbot/background_print"
@@ -26,7 +29,7 @@ class BackgroundPrintService : Service() {
     private var dartChannel: MethodChannel? = null
     private var dartReady = false
     private var printInFlight = false
-    private val pendingPaths = ArrayDeque<String>()
+    private val pendingPaths = ArrayDeque<Pair<String, Int>>()
 
     override fun onCreate() {
         super.onCreate()
@@ -77,7 +80,8 @@ class BackgroundPrintService : Service() {
         if (intent?.action == ACTION_PRINT) {
             val path = intent.getStringExtra(EXTRA_PATH)
             if (!path.isNullOrBlank()) {
-                pendingPaths.addLast(path)
+                val copies = intent.getIntExtra(EXTRA_COPIES, 1).coerceIn(1, MAX_COPIES)
+                pendingPaths.addLast(Pair(path, copies))
                 drainQueue()
             } else {
                 updateNotification("エラー：画像パスが指定されていません")
@@ -89,7 +93,8 @@ class BackgroundPrintService : Service() {
     private fun drainQueue() {
         if (!dartReady || printInFlight || pendingPaths.isEmpty()) return
         printInFlight = true
-        dartChannel?.invokeMethod("print", pendingPaths.removeFirst())
+        val (path, copies) = pendingPaths.removeFirst()
+        dartChannel?.invokeMethod("print", mapOf("path" to path, "copies" to copies))
     }
 
     private fun createNotificationChannel() {

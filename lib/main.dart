@@ -337,7 +337,7 @@ Future<void> backgroundMain() async {
     } catch (_) {}
   }
 
-  Future<void> printFile(String path) async {
+  Future<void> printFile(String path, int copies) async {
     if (busy) {
       await status('別の印刷処理中です。今回の指示は待機キューに残ります');
       // The Android service serializes incoming commands; this guard is a final safeguard.
@@ -433,11 +433,11 @@ Future<void> backgroundMain() async {
       status('ラベルに印刷中'); // 待たずに進める
       final task = client.createPrintTask(
         PrintOptions(
-          totalPages: 1,
+          totalPages: copies, // 全部で何枚印刷するか
           density: 3,
           labelType: LabelType.withGaps,
           statusPollIntervalMs: 50,
-          statusTimeoutMs: 8000,
+          statusTimeoutMs: 8000 + copies * 3000, // 枚数が多いほど待ち時間を延ばす
         ),
       );
       if (task == null) throw Exception('プリンタの機種を判別できませんでした。');
@@ -454,13 +454,13 @@ Future<void> backgroundMain() async {
       );
       await task.printInit();
       final tInit = sw.elapsedMilliseconds;
-      await task.printPage(page.toEncodedImage(), 1);
+      await task.printPage(page.toEncodedImage(), copies); // 同じ画像を copies 枚
       final tSend = sw.elapsedMilliseconds;
       await task.waitForFinished();
       final tFinish = sw.elapsedMilliseconds;
       await client.abstraction.printEnd();
       final tEnd = sw.elapsedMilliseconds;
-      final timing = '接続${tConnect}ms/準備${tInit - tConnect}ms/'
+      final timing = '${copies}枚 接続${tConnect}ms/準備${tInit - tConnect}ms/'
           '転送${tSend - tInit}ms/完了待ち${tFinish - tSend}ms/'
           '終了${tEnd - tFinish}ms/計${tEnd}ms';
       await status('印刷完了 $timing');
@@ -486,12 +486,21 @@ Future<void> backgroundMain() async {
 
   channel.setMethodCallHandler((call) async {
     if (call.method == 'print') {
-      final path = call.arguments as String?;
+      final args = call.arguments;
+      String? path;
+      var copies = 1;
+      if (args is Map) {
+        path = args['path'] as String?;
+        final c = args['copies'];
+        if (c is int) copies = c;
+      } else if (args is String) {
+        path = args; // 旧形式(枚数なし)との互換
+      }
       if (path == null || path.trim().isEmpty) {
         await status('エラー：画像パスが空です');
         return;
       }
-      await printFile(path);
+      await printFile(path, copies < 1 ? 1 : copies);
     }
   });
   await channel.invokeMethod('ready');
