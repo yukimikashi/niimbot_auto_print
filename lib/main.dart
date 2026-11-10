@@ -372,25 +372,29 @@ Future<void> backgroundMain() async {
       const maxAttempts = 5;
       Object? lastError;
       for (var attempt = 1; attempt <= maxAttempts; attempt++) {
-        await status('B1を検索中($attempt/$maxAttempts)');
-        List<BluetoothDevice> devices = [];
-        try {
-          devices = await NiimbotBluetoothClient.listDevices(
-            timeout: const Duration(seconds: 6),
-          );
-        } catch (e) {
-          lastError = e;
-        }
-
-        // 検索で見つからない場合(他アプリが前面のときなど)は、
-        // 検索なしで BLEアドレス を指定して直接接続する。
+        // 1回目は検索せず、BLEアドレスで直接接続する(最速)。
+        // 2回目以降は検索してから接続し、検索で見つからなければ直接接続する。
         final BluetoothDevice device;
-        if (devices.isEmpty) {
+        if (attempt == 1) {
           device = BluetoothDevice.fromId(b1BleAddress);
-          scanInfo = '検索0台→直接接続($attempt/$maxAttempts)';
+          scanInfo = '直接接続($attempt/$maxAttempts)';
         } else {
-          device = devices.first;
-          scanInfo = '検索${devices.length}台($attempt/$maxAttempts)';
+          await status('B1を検索中($attempt/$maxAttempts)');
+          List<BluetoothDevice> devices = [];
+          try {
+            devices = await NiimbotBluetoothClient.listDevices(
+              timeout: const Duration(seconds: 6),
+            );
+          } catch (e) {
+            lastError = e;
+          }
+          if (devices.isEmpty) {
+            device = BluetoothDevice.fromId(b1BleAddress);
+            scanInfo = '検索0台→直接接続($attempt/$maxAttempts)';
+          } else {
+            device = devices.first;
+            scanInfo = '検索${devices.length}台($attempt/$maxAttempts)';
+          }
         }
 
         await status('B1に接続中($attempt/$maxAttempts) $scanInfo');
