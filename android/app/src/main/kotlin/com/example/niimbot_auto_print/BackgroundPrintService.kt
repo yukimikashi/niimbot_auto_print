@@ -114,7 +114,7 @@ class BackgroundPrintService : Service() {
             Notification.Builder(this)
         }
         return builder
-            .setSmallIcon(android.R.drawable.ic_menu_print)
+            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setContentTitle("NIIMBOT Auto Print")
             .setContentText(message)
             .setOngoing(true)
