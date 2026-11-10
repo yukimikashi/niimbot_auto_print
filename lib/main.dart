@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:app_links/app_links.dart';
+import 'package:image/image.dart' as img;
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' show BluetoothDevice;
 import 'package:niim_blue_flutter/niim_blue_flutter.dart';
@@ -102,6 +104,29 @@ class _PrintHomePageState extends State<PrintHomePage> {
     return false;
   }
 
+  // 1bit/パレット/透過PNGでも正しく印刷できるよう、
+  // 「透過は白」「8bit RGB」「400x240」に揃えたPNGへ変換する。
+  Uint8List _normalizeImage(Uint8List src) {
+    final decoded = img.decodeImage(src);
+    if (decoded == null) {
+      throw Exception('画像をデコードできませんでした(PNG/JPG/BMPのみ対応)。');
+    }
+    final flat = img.Image(
+      width: decoded.width,
+      height: decoded.height,
+      numChannels: 3,
+    );
+    img.fill(flat, color: img.ColorRgb8(255, 255, 255));
+    img.compositeImage(flat, decoded);
+    final resized = img.copyResize(
+      flat,
+      width: _labelWidthPx,
+      height: _labelHeightPx,
+      interpolation: img.Interpolation.nearest,
+    );
+    return Uint8List.fromList(img.encodePng(resized));
+  }
+
   Future<void> _printFile(String path) async {
     if (_busy) {
       _setStatus('別の印刷処理が実行中です。少し待ってから再送してください。');
@@ -122,6 +147,8 @@ class _PrintHomePageState extends State<PrintHomePage> {
       }
       final bytes = await imageFile.readAsBytes();
       if (bytes.isEmpty) throw Exception('画像ファイルが空です。');
+      final printBytes = _normalizeImage(bytes);
+      _setStatus('画像を変換: 元${bytes.length}B → ${printBytes.length}B');
 
       // --- BLEで検索 ---
       _setStatus('NIIMBOT B1をBLEで検索中...');
@@ -179,7 +206,7 @@ class _PrintHomePageState extends State<PrintHomePage> {
           y: 0,
           width: _labelWidthPx,
           height: _labelHeightPx,
-          buffer: bytes,
+          buffer: printBytes,
           threshold: 128,
         ),
       );
