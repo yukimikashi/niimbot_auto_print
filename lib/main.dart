@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:app_links/app_links.dart';
 import 'package:image/image.dart' as img;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' show BluetoothDevice;
 import 'package:niim_blue_flutter/niim_blue_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -233,6 +234,31 @@ class _PrintHomePageState extends State<PrintHomePage> {
     await _printFile(path);
   }
 
+  Future<void> _startBackgroundPrint() async {
+    if (!await _requestImagePermission()) return;
+    if (!await _requestBluetoothPermission()) return;
+    final notification = await Permission.notification.request();
+    if (!notification.isGranted && Platform.isAndroid) {
+      _setStatus('通知権限が許可されていません。Androidの通知設定を確認してください。');
+      return;
+    }
+    try {
+      await const MethodChannel('niimbot/background_control').invokeMethod('start');
+      _setStatus('バックグラウンド印刷サービスを開始しました。常駐通知が表示されます。');
+    } catch (error) {
+      _setStatus('バックグラウンドサービス開始エラー: $error');
+    }
+  }
+
+  Future<void> _stopBackgroundPrint() async {
+    try {
+      await const MethodChannel('niimbot/background_control').invokeMethod('stop');
+      _setStatus('バックグラウンド印刷サービスを停止しました。');
+    } catch (error) {
+      _setStatus('サービス停止エラー: $error');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -265,8 +291,20 @@ class _PrintHomePageState extends State<PrintHomePage> {
               label: const Text('テスト印刷'),
             ),
             const SizedBox(height: 8),
+            FilledButton.icon(
+              onPressed: _startBackgroundPrint,
+              icon: const Icon(Icons.play_arrow),
+              label: const Text('バックグラウンド印刷を開始'),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _stopBackgroundPrint,
+              icon: const Icon(Icons.stop),
+              label: const Text('バックグラウンド印刷を停止'),
+            ),
+            const SizedBox(height: 8),
             const Text(
-              '通常はMacroDroidから niimbotautoprint://print?path=... を送ると自動印刷します。',
+              'MacroDroidはブロードキャストで画像パスを送信します。画面を開かずに印刷します。',
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 12),
             ),
@@ -275,4 +313,132 @@ class _PrintHomePageState extends State<PrintHomePage> {
       ),
     );
   }
+}
+
+
+// Separate Flutter engine entry point used by the Android foreground service.
+// Permissions are requested in the visible app before the service is started.
+@pragma('vm:entry-point')
+Future<void> backgroundMain() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  const channel = MethodChannel('niimbot/background_print');
+  const b1Mac = '03:31:08:B6:88:2E';
+  const labelWidthPx = 400;
+  const labelHeightPx = 240;
+  bool busy = false;
+
+  Future<void> status(String message) async {
+    try {
+      await channel.invokeMethod('status', message);
+    } catch (_) {}
+  }
+
+  Future<void> printFile(String path) async {
+    if (busy) {
+      await status('別の印刷処理中です。今回の指示は待機キューに残ります');
+      // The Android service serializes incoming commands; this guard is a final safeguard.
+      return;
+    }
+    busy = true;
+    NiimbotBluetoothClient? client;
+    try {
+      await status('画像を読み込み中');
+      final imageFile = File(path);
+      if (!await imageFile.exists()) {
+        throw Exception('画像ファイルが見つかりません: $path');
+      }
+      final bytes = await imageFile.readAsBytes();
+      if (bytes.isEmpty) throw Exception('画像ファイルが空です。');
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null) throw Exception('画像をデコードできませんでした。');
+      final flat = img.Image(width: decoded.width, height: decoded.height, numChannels: 3);
+      img.fill(flat, color: img.ColorRgb8(255, 255, 255));
+      img.compositeImage(flat, decoded);
+      final resized = img.copyResize(
+        flat,
+        width: labelWidthPx,
+        height: labelHeightPx,
+        interpolation: img.Interpolation.nearest,
+      );
+      final printBytes = Uint8List.fromList(img.encodePng(resized));
+
+      await status('NIIMBOT B1を検索中');
+      final devices = await NiimbotBluetoothClient.listDevices(
+        timeout: const Duration(seconds: 8),
+      );
+      final BluetoothDevice device = devices.firstWhere(
+        (d) => d.remoteId.str.toUpperCase() == b1Mac,
+        orElse: () => devices.isNotEmpty
+            ? devices.first
+            : BluetoothDevice.fromId(b1Mac),
+      );
+
+      await status('B1に接続中');
+      client = NiimbotBluetoothClient();
+      client.setDevice(device);
+      await client.connect().timeout(
+        const Duration(seconds: 25),
+        onTimeout: () => throw TimeoutException('B1接続がタイムアウトしました。'),
+      );
+      client.stopHeartbeat();
+      client.setPacketInterval(0);
+
+      await status('ラベルに印刷中');
+      final task = client.createPrintTask(
+        PrintOptions(
+          totalPages: 1,
+          density: 3,
+          labelType: LabelType.withGaps,
+          statusPollIntervalMs: 100,
+          statusTimeoutMs: 8000,
+        ),
+      );
+      if (task == null) throw Exception('プリンタの機種を判別できませんでした。');
+      final page = PrintPage(labelWidthPx, labelHeightPx);
+      page.addImageFromBuffer(
+        ImageFromBufferOptions(
+          x: 0,
+          y: 0,
+          width: labelWidthPx,
+          height: labelHeightPx,
+          buffer: printBytes,
+          threshold: 128,
+        ),
+      );
+      await task.printInit();
+      await task.printPage(page.toEncodedImage(), 1);
+      await task.waitForFinished();
+      await client.abstraction.printEnd();
+      await status('印刷完了');
+      await channel.invokeMethod('printResult', {
+        'success': true,
+        'message': '印刷完了：${DateTime.now().toLocal()}',
+      });
+    } catch (error) {
+      await status('印刷エラー: $error');
+      try {
+        await channel.invokeMethod('printResult', {
+          'success': false,
+          'message': '印刷エラー: $error',
+        });
+      } catch (_) {}
+    } finally {
+      try {
+        await client?.disconnect();
+      } catch (_) {}
+      busy = false;
+    }
+  }
+
+  channel.setMethodCallHandler((call) async {
+    if (call.method == 'print') {
+      final path = call.arguments as String?;
+      if (path == null || path.trim().isEmpty) {
+        await status('エラー：画像パスが空です');
+        return;
+      }
+      await printFile(path);
+    }
+  });
+  await channel.invokeMethod('ready');
 }
